@@ -1,0 +1,542 @@
+"use client";
+
+import { Badge, Card, PageHeader, ShimmerBlock, StatCard } from "@/components/ui/AdminUI";
+import api from "@/lib/api";
+import { currency, date, monthName } from "@/lib/format";
+import { Ban, Building2, CheckCircle2, CreditCard, FileText, Mail, MapPin, MessageCircle, Phone, Printer, Receipt, Settings, Shield, Wallet } from "lucide-react";
+import Image from "next/image";
+import Link from "next/link";
+import { ReactNode, useEffect, useState } from "react";
+
+type ApiRecord = Record<string, unknown>;
+
+type SettingRecord = ApiRecord & {
+  settingKey?: string;
+  key?: string;
+  settingValue?: string;
+  value?: string;
+};
+
+type InvoiceItemInput = {
+  name?: string;
+  quantity?: number | string;
+  unitPrice?: number | string;
+  price?: number | string;
+  discount?: number | string;
+  total?: number | string;
+};
+
+type NormalizedInvoiceItem = {
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  discount: number;
+  total: number;
+};
+
+type CustomerRecord = {
+  customerCode?: string;
+  name?: string;
+  address?: string;
+  email?: string;
+  phone?: string;
+};
+
+type InvoiceRecord = ApiRecord & {
+  id?: string;
+  customer?: CustomerRecord;
+  items?: InvoiceItemInput[] | string;
+  subtotal?: number | string;
+  discountTotal?: number | string;
+  taxAmount?: number | string;
+  grandTotal?: number | string;
+  amount?: number | string;
+  noFaktur?: string;
+  noInvoice?: string;
+  invoiceName?: string;
+  periodMonth?: number;
+  periodYear?: number;
+  status?: string;
+  dueDate?: string;
+  updatedAt?: string;
+  createdAt?: string;
+  notes?: string;
+  disableAuthOnDue?: boolean;
+  serviceType?: string;
+  customerName?: string;
+};
+
+type PaymentRecord = ApiRecord & {
+  id?: string;
+  method?: string;
+  paidAt?: string;
+  amount?: number | string;
+  status?: string;
+  customerName?: string;
+  invoiceNo?: string;
+  referenceNo?: string;
+};
+
+type PartnerRecord = ApiRecord & {
+  id?: string;
+  status?: string;
+};
+
+function getErrorMessage(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null && "response" in error) {
+    const response = (error as { response?: { data?: { message?: unknown } } }).response;
+    if (typeof response?.data?.message === "string" && response.data.message) {
+      return response.data.message;
+    }
+  }
+
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return fallback;
+}
+
+export function InvoiceDetailPage({ id }: { id: string }) {
+  const [invoice, setInvoice] = useState<InvoiceRecord | null>(null);
+  const [settings, setSettings] = useState<SettingRecord[]>([]);
+  const [payment, setPayment] = useState<PaymentRecord | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadDetail() {
+      await Promise.resolve();
+      if (!active) return;
+
+      setLoading(true);
+      setMessage("");
+      setPayment(null);
+
+      try {
+        const [invoiceRes, settingsRes] = await Promise.all([
+          api.get("/internet-services/" + id),
+          api.get("/settings?limit=100&search=company_").catch(() => ({ data: { data: [] } })),
+        ]);
+
+        if (!active) return;
+
+        const invoiceData = invoiceRes.data.data;
+        setInvoice(invoiceData);
+        setSettings(settingsRes.data.data || []);
+
+        const invoiceKeys = [invoiceData?.noInvoice, invoiceData?.noFaktur].filter(Boolean);
+        if (invoiceKeys.length) {
+          try {
+            let foundPayment = null;
+            for (const invoiceKey of invoiceKeys) {
+              const paymentRes = await api.get(`/finance?limit=1&search=${encodeURIComponent(invoiceKey)}`);
+              foundPayment = Array.isArray(paymentRes.data.data) ? paymentRes.data.data[0] || null : null;
+              if (foundPayment) break;
+            }
+            if (active) setPayment(foundPayment);
+          } catch {
+            if (active) setPayment(null);
+          }
+        }
+      } catch (err: unknown) {
+        if (!active) return;
+        setInvoice(null);
+        setSettings([]);
+        setMessage(getErrorMessage(err, "Gagal memuat detail faktur dari database."));
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadDetail();
+    return () => { active = false; };
+  }, [id]);
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <ShimmerBlock className="h-14 rounded-xl" />
+        <Card className="p-6">
+          <ShimmerBlock className="h-12 w-56" />
+          <div className="mt-8 grid gap-6 lg:grid-cols-2">
+            <ShimmerBlock className="h-48 rounded-xl" />
+            <ShimmerBlock className="h-48 rounded-xl" />
+          </div>
+          <ShimmerBlock className="mt-8 h-72 rounded-xl" />
+        </Card>
+      </div>
+    );
+  }
+
+  if (!invoice) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Detail Faktur" subtitle="Data faktur tidak dapat dimuat dari backend." />
+        <div className="rounded-xl border border-rose-100 bg-rose-50 px-5 py-4 text-sm font-semibold text-rose-700">{message || "Faktur tidak ditemukan."}</div>
+      </div>
+    );
+  }
+
+  const customer = invoice.customer || {};
+  const items = normalizeInvoiceItems(invoice);
+  const subtotal = numberValue(invoice.subtotal) || items.reduce((total, item) => total + item.unitPrice * item.quantity, 0);
+  const discount = numberValue(invoice.discountTotal) || items.reduce((total, item) => total + item.discount, 0);
+  const tax = numberValue(invoice.taxAmount);
+  const total = numberValue(invoice.grandTotal) || numberValue(invoice.amount) || Math.max(0, subtotal - discount + tax);
+  const invoiceNumber = invoice.noFaktur || invoice.noInvoice || invoice.id;
+  const invoiceHeader = String(invoiceNumber).toUpperCase().startsWith("INV") ? invoiceNumber : `INV-${invoiceNumber}`;
+  const invoiceTitle = invoice.invoiceName || `Periode ${monthName(invoice.periodMonth)} ${invoice.periodYear}`;
+  const paymentUrl = `https://srv.ring.net.id/mypay/${encodeURIComponent(invoiceNumber || "invoice")}`;
+  const companyName = settingValue(settings, "company_name", "Ring Media Nusantara");
+  const companyAddress = settingValue(settings, "company_address", "Jl. Wuluh No. 1 Papringan, RT. 13, RW. 05, Caturtunggal, Depok, Sleman, DI Yogyakarta 55281.");
+  const companyEmail = settingValue(settings, "company_email", "billing@ring.net.id");
+  const companyPhone = settingValue(settings, "company_phone", "+6287747963000");
+  const isPaid = String(invoice.status || "").toUpperCase() === "PAID";
+  const paymentMethod = payment?.method || "-";
+  const paymentDate = payment?.paidAt || invoice.updatedAt || invoice.createdAt;
+
+  return (
+    <div className="invoice-detail-page space-y-6">
+      <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm print:hidden">
+        <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-500">
+          <span>Dashboard</span><span>/</span><Link href="/keuangan" className="hover:text-indigo-600">Keuangan</Link><span>/</span><Link href="/internet-services" className="text-indigo-600 hover:underline">Faktur & Tagihan</Link><span>/</span><span className="text-slate-800">{invoiceNumber}</span>
+        </div>
+      </div>
+      {message ? <div className="mb-4 rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-700 print:hidden">{message}</div> : null}
+
+      <Card className="invoice-print-card overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-[#5B9CE5] px-5 py-4 text-white print:hidden">
+          <h1 className="text-lg font-bold">{invoiceHeader}</h1>
+          <button type="button" onClick={() => window.print()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-white/15 px-4 text-sm font-bold transition hover:bg-white/25">
+            <Printer size={17} /> Cetak
+          </button>
+        </div>
+
+        <div className="invoice-print-body space-y-8 p-5 lg:p-8">
+          <div className="invoice-print-logo-row flex flex-col gap-6 border-y border-slate-200 py-6 md:flex-row md:items-center md:justify-between">
+            <div className="relative h-28 w-52 invoice-print-logo">
+              <Image src="/assets/logo.png" alt="RingNet" fill sizes="208px" className="object-contain object-left" priority />
+            </div>
+            {isPaid ? (
+              <div className="invoice-print-success hidden items-center gap-3 rounded-2xl bg-emerald-100 px-10 py-4 text-xl font-black text-slate-900 print:inline-flex">
+                <CheckCircle2 size={22} className="text-emerald-600" /> Pembayaran Berhasil
+              </div>
+            ) : null}
+            <div className="invoice-title-block text-left md:text-right">
+              <p className="text-2xl font-black text-slate-950">#{invoiceNumber}</p>
+              <p className="mt-1 text-xl font-bold text-slate-800">{invoiceTitle}</p>
+              <span className="mt-3 inline-flex rounded-md bg-amber-400 px-3 py-1 text-sm font-black uppercase text-white">
+                Jatuh Tempo : {date(invoice.dueDate)}
+              </span>
+            </div>
+          </div>
+
+          {isPaid ? (
+            <div className="invoice-paid-detail grid gap-6 border-y border-slate-200 py-6 lg:grid-cols-[1.05fr_1fr]">
+              <div className="space-y-2 text-sm font-semibold text-slate-700">
+                <InvoiceInfoLine label="ID Pelanggan" value={customer.customerCode || "-"} />
+                <InvoiceInfoLine label="Nomor Tagihan" value={String(invoiceNumber || "-")} />
+                <InvoiceInfoLine label="Metode Pembayaran" value={paymentMethod} />
+                <InvoiceInfoLine label="Tanggal Pembayaran" value={date(paymentDate)} />
+                <InvoiceInfoLine label="Nama Tagihan" value={invoiceTitle} />
+              </div>
+              <div className="flex flex-col justify-between gap-5 text-left lg:text-right">
+                <div>
+                  <div className="invoice-paid-status-screen ml-auto inline-flex items-center gap-2 rounded-xl bg-emerald-100 px-6 py-3 text-sm font-black text-emerald-700">
+                    <CheckCircle2 size={18} /> Pembayaran Berhasil
+                  </div>
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold text-slate-950">{invoice.customerName || customer.name || "Faktur Umum"}</h2>
+                  <p className="mt-2 text-sm font-semibold text-slate-500">ID Pelanggan : <span className="text-slate-800">{customer.customerCode || "-"}</span></p>
+                  <div className="mt-4 space-y-2 text-sm font-semibold text-slate-600">
+                    <p>{customer.address || "-"} <MapPin className="inline text-rose-500" size={16} /></p>
+                    <p>{customer.email || "-"} <Mail className="inline text-cyan-500" size={16} /></p>
+                    <p>{customer.phone || "-"} <Phone className="inline text-emerald-500" size={16} /></p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-8 lg:grid-cols-2">
+              <div>
+                <h2 className="text-2xl font-bold text-slate-950">{companyName}</h2>
+                <div className="mt-5 space-y-3 text-sm font-semibold text-slate-600">
+                  <IconLine icon={<MapPin size={18} />} value={companyAddress} />
+                  <IconLine icon={<Mail size={18} />} value={companyEmail} accent="text-cyan-500" />
+                  <IconLine icon={<Phone size={18} />} value={companyPhone} accent="text-emerald-500" />
+                </div>
+              </div>
+              <div className="text-left lg:text-right">
+                <h2 className="text-2xl font-bold text-slate-950">{invoice.customerName || customer.name || "Faktur Umum"}</h2>
+                <p className="mt-2 text-sm font-semibold text-slate-500">ID Pelanggan : <span className="text-slate-800">{customer.customerCode || "-"}</span></p>
+                <div className="mt-4 space-y-2 text-sm font-semibold text-slate-600">
+                  <p>{customer.address || "-"}</p>
+                  <p>{customer.email || "-"}</p>
+                  <p>{customer.phone || "-"}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <section>
+            <h2 className="mb-3 text-xl font-bold text-slate-950">Rincian Pembayaran :</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[860px] border border-slate-200 text-sm">
+                <thead className="bg-slate-50 text-left font-bold text-slate-600">
+                  <tr>
+                    <th className="w-16 border border-slate-200 px-4 py-4 text-center">No</th>
+                    <th className="border border-slate-200 px-4 py-4">Nama Produk</th>
+                    <th className="w-24 border border-slate-200 px-4 py-4 text-center">Qty</th>
+                    <th className="w-40 border border-slate-200 px-4 py-4 text-right">Harga</th>
+                    <th className="w-40 border border-slate-200 px-4 py-4 text-right">Diskon</th>
+                    <th className="w-40 border border-slate-200 px-4 py-4 text-right">Jumlah</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item, index) => (
+                    <tr key={`${item.name}-${index}`}>
+                      <td className="border border-slate-200 px-4 py-4 text-center font-semibold text-slate-600">{index + 1}</td>
+                      <td className="border border-slate-200 px-4 py-4 font-bold text-slate-700">{item.name}</td>
+                      <td className="border border-slate-200 px-4 py-4 text-center"><span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-black text-blue-600">{item.quantity}</span></td>
+                      <td className="border border-slate-200 px-4 py-4 text-right font-semibold text-slate-600">{currency(item.unitPrice)}</td>
+                      <td className="border border-slate-200 px-4 py-4 text-right font-semibold text-slate-600">{currency(item.discount)}</td>
+                      <td className="border border-slate-200 px-4 py-4 text-right font-semibold text-slate-600">{currency(item.total)}</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td colSpan={5} className="border border-slate-200 px-4 py-4 text-right font-bold text-slate-700">Subtotal</td>
+                    <td className="border border-slate-200 px-4 py-4 text-right font-bold text-slate-700">{currency(subtotal)}</td>
+                  </tr>
+                  {discount ? (
+                    <tr>
+                      <td colSpan={5} className="border border-slate-200 px-4 py-4 text-right font-bold text-slate-700">Diskon</td>
+                      <td className="border border-slate-200 px-4 py-4 text-right font-bold text-slate-700">{currency(discount)}</td>
+                    </tr>
+                  ) : null}
+                  {tax ? (
+                    <tr>
+                      <td colSpan={5} className="border border-slate-200 px-4 py-4 text-right font-bold text-slate-700">Pajak</td>
+                      <td className="border border-slate-200 px-4 py-4 text-right font-bold text-slate-700">{currency(tax)}</td>
+                    </tr>
+                  ) : null}
+                  <tr className="bg-amber-50">
+                    <td colSpan={5} className="border border-amber-200 px-4 py-4 text-right text-base font-black text-slate-800">TOTAL</td>
+                    <td className="border border-amber-200 px-4 py-4 text-right text-base font-black text-slate-800">{currency(total)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {invoice.notes ? <div className="rounded-lg border border-slate-200 px-4 py-3 text-sm text-slate-600">{invoice.notes}</div> : null}
+
+          {isPaid ? (
+            <div className="invoice-print-footer rounded-lg border border-slate-200 px-4 py-4 text-center">
+              <h3 className="text-lg font-bold text-slate-950">{companyName}</h3>
+              <p className="mt-1 text-xs font-semibold text-slate-500">{companyAddress}</p>
+              <p className="mt-1 text-xs font-semibold text-slate-500">{companyPhone}  •  {companyEmail}</p>
+            </div>
+          ) : (
+            <div className="space-y-4 text-center">
+              <DigitalQr value={paymentUrl} />
+              <div className="rounded-lg bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-600">
+                Link Pembayaran : <a href={paymentUrl} className="text-blue-500 hover:underline" target="_blank" rel="noreferrer">{paymentUrl}</a>
+              </div>
+              <p className="font-bold text-slate-700">Faktur dibuat secara digital dan berlaku tanpa tanda tangan dan stempel</p>
+              <p className="text-sm font-semibold text-slate-500">{date(invoice.createdAt || new Date())}</p>
+            </div>
+          )}
+
+          {invoice.disableAuthOnDue ? (
+            <div className="rounded-lg bg-rose-50 px-4 py-4 text-center font-semibold text-rose-700">
+              Autentikasi akan dinonaktifkan saat tagihan jatuh tempo
+            </div>
+          ) : null}
+
+          {!isPaid ? (
+            <div className="flex flex-wrap justify-center gap-3 border-t border-slate-100 pt-6">
+              <Link href={`/keuangan/new?invoice=${encodeURIComponent(String(invoice.noInvoice || invoice.noFaktur || invoiceNumber || ""))}`} className="inline-flex h-11 items-center gap-2 rounded-lg bg-cyan-500 px-5 text-sm font-bold text-white shadow-sm shadow-cyan-100"><CreditCard size={18} /> Tambah Pembayaran</Link>
+              <Link href={`/internet-services/${invoice.id}/edit`} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#5B9CE5] px-5 text-sm font-bold text-white shadow-sm shadow-blue-100"><FileText size={18} /> Ubah Tagihan</Link>
+              <button type="button" onClick={() => setMessage("Fitur pembatalan tagihan akan memakai status khusus pada tahap berikutnya.")} className="inline-flex h-11 items-center gap-2 rounded-lg bg-rose-500 px-5 text-sm font-bold text-white shadow-sm shadow-rose-100"><Ban size={18} /> Batalkan Tagihan</button>
+              <a href={`https://wa.me/${String(customer.phone || "").replace(/\D/g, "")}?text=${encodeURIComponent(`Halo ${invoice.customerName || customer.name || ""}, berikut link pembayaran faktur ${invoiceNumber}: ${paymentUrl}`)}`} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center gap-2 rounded-lg bg-emerald-500 px-5 text-sm font-bold text-white shadow-sm shadow-emerald-100"><MessageCircle size={18} /> Kirim Pesan</a>
+            </div>
+          ) : null}
+        </div>
+      </Card>
+      </div>
+  );
+}
+
+function Info({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-lg bg-slate-50 p-4"><p className="text-xs font-bold uppercase tracking-wide text-slate-400">{label}</p><p className="mt-1 font-semibold text-slate-900">{value}</p></div>;
+}
+
+function IconLine({ icon, value, accent = "text-rose-500" }: { icon: ReactNode; value: string; accent?: string }) {
+  return <div className="flex items-start gap-3"><span className={accent}>{icon}</span><span>{value || "-"}</span></div>;
+}
+
+function InvoiceInfoLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[150px_1fr] gap-2">
+      <span className="text-slate-500">{label}</span>
+      <span className="font-bold text-slate-800">: {value || "-"}</span>
+    </div>
+  );
+}
+
+function settingValue(settings: SettingRecord[], key: string, defaultValue: string) {
+  const item = settings.find((setting) => setting.settingKey === key || setting.key === key);
+  return item?.settingValue || item?.value || defaultValue;
+}
+
+function numberValue(value: unknown) {
+  return Number(value || 0);
+}
+
+function normalizeInvoiceItems(invoice: InvoiceRecord): NormalizedInvoiceItem[] {
+  const rawItems = typeof invoice.items === "string" ? safeJson(invoice.items) : invoice.items;
+  if (Array.isArray(rawItems) && rawItems.length) {
+    return rawItems.map((item) => {
+      const normalizedItem = item as InvoiceItemInput;
+      const quantity = Number(normalizedItem.quantity || 1);
+      const unitPrice = Number(normalizedItem.unitPrice || normalizedItem.price || 0);
+      const discount = Number(normalizedItem.discount || 0);
+      return {
+        name: normalizedItem.name || invoice.serviceType || "Layanan Internet",
+        quantity,
+        unitPrice,
+        discount,
+        total: Number(normalizedItem.total || Math.max(0, unitPrice * quantity - discount)),
+      };
+    });
+  }
+
+  const amount = numberValue(invoice.amount);
+  return [{
+    name: invoice.serviceType || "Layanan Internet",
+    quantity: 1,
+    unitPrice: amount,
+    discount: 0,
+    total: amount,
+  }];
+}
+
+function safeJson(value: string): unknown[] {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return [];
+  }
+}
+
+function DigitalQr({ value }: { value: string }) {
+  const seed = value.split("").reduce((total, char) => total + char.charCodeAt(0), 0);
+  return (
+    <div className="mx-auto grid w-fit grid-cols-[repeat(17,7px)] gap-[2px] rounded-lg bg-white p-3 shadow-sm ring-1 ring-slate-200" aria-label="QR pembayaran">
+      {Array.from({ length: 289 }).map((_, index) => {
+        const row = Math.floor(index / 17);
+        const col = index % 17;
+        const finder = (row < 5 && col < 5) || (row < 5 && col > 11) || (row > 11 && col < 5);
+        const core = finder && (row === 0 || row === 4 || col === 0 || col === 4 || row === 2 || col === 2);
+        const active = core || ((index * 37 + seed + row * 11 + col * 5) % 9 < 4);
+        return <span key={index} className={active ? "h-[7px] w-[7px] bg-slate-950" : "h-[7px] w-[7px] bg-white"} />;
+      })}
+    </div>
+  );
+}
+
+export function FinancePage() {
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
+  const [partners, setPartners] = useState<PartnerRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadFinance() {
+      await Promise.resolve();
+      if (!active) return;
+
+      setLoading(true);
+      setError("");
+
+      try {
+        const [paymentRes, invoiceRes, partnerRes] = await Promise.all([
+          api.get("/finance?limit=5000"),
+          api.get("/internet-services?limit=5000"),
+          api.get("/partners?limit=5000"),
+        ]);
+
+        if (!active) return;
+
+        setPayments(Array.isArray(paymentRes.data.data) ? paymentRes.data.data : []);
+        setInvoices(Array.isArray(invoiceRes.data.data) ? invoiceRes.data.data : []);
+        setPartners(Array.isArray(partnerRes.data.data) ? partnerRes.data.data : []);
+      } catch (err: unknown) {
+        if (!active) return;
+        setPayments([]);
+        setInvoices([]);
+        setPartners([]);
+        setError(getErrorMessage(err, "Gagal memuat data keuangan dari database."));
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void loadFinance();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const paidPayments = payments.filter((item) => String(item.status || "").toLowerCase() === "verified");
+  const unpaidInvoices = invoices.filter((item) => String(item.status || "").toUpperCase() !== "PAID");
+  const paymentTotal = paidPayments.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const outstandingTotal = unpaidInvoices.reduce((sum, item) => sum + Number(item.amount || item.grandTotal || 0), 0);
+
+  return (
+    <div>
+      <PageHeader title="Keuangan" subtitle="Monitoring pembayaran, tunggakan, dan cashflow." />
+      {error ? <div className="mb-4 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">{error}</div> : null}
+      {loading ? (
+        <div className="grid gap-4 md:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, index) => <ShimmerBlock key={index} className="h-28 rounded-xl" />)}
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-3">
+          <StatCard icon={<Wallet size={22} />} label="Pembayaran Masuk" value={currency(paymentTotal)} trend={`${paidPayments.length} pembayaran verified`} />
+          <StatCard icon={<Receipt size={22} />} label="Belum Lunas" value={currency(outstandingTotal)} trend={`${unpaidInvoices.length} invoice terbuka`} accent="amber" />
+          <StatCard icon={<Building2 size={22} />} label="Mitra Aktif" value={String(partners.filter((item) => item.status === "active").length)} trend={`${partners.length} total mitra`} accent="emerald" />
+        </div>
+      )}
+      <Card className="mt-6 p-5">
+        <h2 className="mb-4 font-bold text-slate-950">Rekonsiliasi Terbaru</h2>
+        {loading ? <div className="space-y-3">{Array.from({ length: 5 }).map((_, index) => <ShimmerBlock key={index} className="h-16 rounded-lg" />)}</div> : (
+          <div className="space-y-3">
+            {payments.length ? payments.map((item) => (
+              <div key={item.id} className="flex items-center justify-between rounded-lg bg-slate-50 p-3">
+                <div><p className="font-semibold">{item.customerName}</p><p className="text-sm text-slate-500">{item.invoiceNo || item.referenceNo}</p></div>
+                <div className="text-right"><p className="font-bold">{currency(item.amount)}</p><Badge value={item.status} /></div>
+              </div>
+            )) : <div className="rounded-lg bg-slate-50 p-6 text-center text-sm font-semibold text-slate-500">Belum ada data pembayaran.</div>}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+export function ReportsPage() {
+  return <div><PageHeader title="Laporan" subtitle="Laporan pelanggan, pendapatan, invoice, dan marketing." /><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{["Pendapatan Bulanan", "Aging Tunggakan", "Akuisisi Pelanggan", "Performa Mitra"].map((item) => <Card key={item} className="p-5"><FileText className="text-indigo-500" size={24} /><h2 className="mt-4 font-bold text-slate-950">{item}</h2><p className="mt-2 text-sm text-slate-500">Export PDF/XLS dan filter periode tersedia.</p><button className="mt-5 h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700">Generate</button></Card>)}</div></div>;
+}
+
+export function SettingsPage() {
+  return <div><PageHeader title="Pengaturan" subtitle="Konfigurasi sistem, profil perusahaan, dan keamanan." /><div className="grid gap-6 xl:grid-cols-2"><Card className="p-6"><Settings className="text-indigo-500" size={26} /><h2 className="mt-4 font-bold text-slate-950">Profil Perusahaan</h2><div className="mt-5 grid gap-4"><Info label="Nama" value="MyRingNet ISP" /><Info label="Domain API" value="http://localhost:3000/api" /><Info label="Zona Waktu" value="Asia/Jakarta" /></div></Card><Card className="p-6"><Shield className="text-emerald-500" size={26} /><h2 className="mt-4 font-bold text-slate-950">Keamanan</h2><div className="mt-5 space-y-3"><div className="flex items-center justify-between rounded-lg bg-slate-50 p-4"><span className="font-semibold">JWT Authentication</span><Badge value="active" /></div><div className="flex items-center justify-between rounded-lg bg-slate-50 p-4"><span className="font-semibold">Protected Routes</span><Badge value="active" /></div></div></Card></div></div>;
+}

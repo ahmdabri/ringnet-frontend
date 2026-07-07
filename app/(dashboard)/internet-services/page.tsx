@@ -1,0 +1,1 @@
+import { InternetServicesPage } from "@/components/pages/ListPages"; export default InternetServicesPage;

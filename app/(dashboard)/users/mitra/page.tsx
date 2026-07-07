@@ -1,0 +1,1 @@
+import { PartnersPage } from "@/components/pages/ListPages"; export default PartnersPage;

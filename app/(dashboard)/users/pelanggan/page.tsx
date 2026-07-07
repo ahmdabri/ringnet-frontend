@@ -1,0 +1,1 @@
+import { CustomersPage } from "@/components/pages/ListPages"; export default CustomersPage;

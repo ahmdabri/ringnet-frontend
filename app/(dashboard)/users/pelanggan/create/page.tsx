@@ -1,0 +1,5 @@
+import { CustomerForm } from "@/components/pages/FormPages";
+
+export default function Page() {
+  return <CustomerForm />;
+}
