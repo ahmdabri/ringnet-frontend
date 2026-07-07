@@ -27,15 +27,6 @@ Buka aplikasi di:
 http://localhost:3001
 ```
 
-Panduan migrasi dan deployment VPS dikelola di repository backend: `my-ringnet-backend/DEPLOYMENT.md`.
-
-Credential seed yang tersedia:
-
-```text
-Email: superadmin@ringnet.com
-Password: password123
-```
-
 ## Environment
 
 Buat atau sesuaikan `.env.local`:
